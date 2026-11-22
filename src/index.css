@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-brand: #0b6b50;
+  --color-brand-dark: #08543f;
+  --color-canvas: #f2f6f4;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    background-color: #f2f6f4;
+    color: #10241d;
+  }
+
+  h1, h2, h3 {
+    text-wrap: balance;
+  }
+}
+
+/* Print rules: only print the A6 QR card cleanly */
+@page {
+  size: A6 portrait;
+  margin: 0;
+}
+
+@media print {
+  html,
+  body {
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only-root {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 105mm !important;
+    height: 148mm !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  .print-a6-card {
+    width: 105mm !important;
+    height: 148mm !important;
+    max-width: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 !important;
+    padding: 8mm !important;
+    page-break-inside: avoid !important;
+  }
+}

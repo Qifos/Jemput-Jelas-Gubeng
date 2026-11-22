@@ -1,0 +1,6 @@
+{
+  "name": "Jemput Jelas Gubeng",
+  "description": "Panduan titik temu ojek daring, rute jalan kaki, dan pemeriksaan kendaraan di Stasiun Gubeng Lama, Surabaya.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
