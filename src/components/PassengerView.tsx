@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   AlertTriangle,
@@ -86,6 +86,19 @@ export function PassengerView({
   const [activeMarker, setActiveMarker] = useState<MapMarkerKey>('A');
   const [checks, setChecks] = useState<VehicleCheckState>(INITIAL_CHECKS);
   const [showCheckValidationError, setShowCheckValidationError] = useState(false);
+  const prevPointIdRef = useRef<string>(activePoint.id);
+
+  useEffect(() => {
+    if (prevPointIdRef.current !== activePoint.id) {
+      prevPointIdRef.current = activePoint.id;
+      setChecks(INITIAL_CHECKS);
+      setShowCheckValidationError(false);
+      setActiveMarker('A');
+      setScreen((current) =>
+        current === 'selesai' || current === 'pemulihan' ? 'panduan' : current,
+      );
+    }
+  }, [activePoint.id]);
 
   const uniqueExits = getUniqueExits(points);
   const availableOperators = getOperatorsForExit(points, selectedExit);

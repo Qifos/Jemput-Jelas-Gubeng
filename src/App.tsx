@@ -1,40 +1,90 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Cloud, HardDrive } from 'lucide-react';
 import { ManageDataView } from './components/ManageDataView';
 import { PassengerView } from './components/PassengerView';
 import { QrCardView } from './components/QrCardView';
 import { Toast } from './components/Toast';
 import { TopBar } from './components/TopBar';
-import { AppTab, OperatorId, PickupPointData } from './types';
+import {
+  AppTab,
+  OperatorId,
+  PickupPointData,
+  PickupPointFormInput,
+} from './types';
+import {
+  createPickupPointApi,
+  deletePickupPointApi,
+  fetchPickupPoints,
+  resetPickupPointsApi,
+  StorageMode,
+  updatePickupPointApi,
+} from './utils/api';
 import {
   findMatchingPoint,
   getOperatorsForExit,
-  isPassengerModeFromSearch,
+  parsePassengerQueryParams,
+  resolveInitialSelection,
 } from './utils/pickupLogic';
-import {
-  loadPickupPoints,
-  resetPickupPointsToDefault,
-  savePickupPoints,
-} from './utils/storage';
+import { loadPickupPoints, STORAGE_KEY } from './utils/storage';
 
 export default function App() {
-  const isStandalonePassengerMode = useMemo(() => {
-    if (typeof window === 'undefined') return false;
-    return isPassengerModeFromSearch(window.location.search);
+  const initialQuery = useMemo(() => {
+    if (typeof window === 'undefined') {
+      return { isPassengerMode: false, pintu: null, operator: null };
+    }
+    return parsePassengerQueryParams(window.location.search);
   }, []);
 
-  const [activeTab, setActiveTab] = useState<AppTab>('penumpang');
-  const [points, setPoints] = useState<PickupPointData[]>(() => loadPickupPoints());
-  const [selectedExit, setSelectedExit] = useState<string>(
-    () => loadPickupPoints()[0].pintuKeluar,
+  const isStandalonePassengerMode = initialQuery.isPassengerMode;
+
+  const initialPoints = useMemo(() => loadPickupPoints(), []);
+  const initialSelection = useMemo(
+    () => resolveInitialSelection(initialPoints, initialQuery),
+    [initialPoints, initialQuery],
   );
+
+  const [activeTab, setActiveTab] = useState<AppTab>('penumpang');
+  const [points, setPoints] = useState<PickupPointData[]>(initialPoints);
+  const [storageMode, setStorageMode] = useState<StorageMode>('local');
+  const [selectedExit, setSelectedExit] = useState<string>(initialSelection.selectedExit);
   const [selectedOperator, setSelectedOperator] = useState<OperatorId>(
-    () => loadPickupPoints()[0].operator,
+    initialSelection.selectedOperator,
   );
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const hasUserChangedSelectionRef = useRef(false);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
   };
+
+  // Sync initial data from Express backend (with transparent localStorage fallback)
+  useEffect(() => {
+    let cancelled = false;
+    fetchPickupPoints().then((res) => {
+      if (cancelled) return;
+      setPoints(res.items);
+      setStorageMode(res.storageMode);
+      if (!hasUserChangedSelectionRef.current) {
+        const resolved = resolveInitialSelection(res.items, initialQuery);
+        setSelectedExit(resolved.selectedExit);
+        setSelectedOperator(resolved.selectedOperator);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [initialQuery]);
+
+  // Cross-tab synchronization via window storage event
+  useEffect(() => {
+    const handleStorageChange = (event: StorageEvent) => {
+      if (event.key !== STORAGE_KEY) return;
+      const syncedPoints = loadPickupPoints();
+      setPoints(syncedPoints);
+    };
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
 
   useEffect(() => {
     if (!toastMessage) return;
@@ -49,6 +99,7 @@ export default function App() {
   }, [points, selectedExit, selectedOperator]);
 
   const handleChangeExit = (nextExit: string) => {
+    hasUserChangedSelectionRef.current = true;
     setSelectedExit(nextExit);
     const availableOps = getOperatorsForExit(points, nextExit);
     if (availableOps.length > 0 && !availableOps.includes(selectedOperator)) {
@@ -57,33 +108,41 @@ export default function App() {
   };
 
   const handleChangeOperator = (nextOp: OperatorId) => {
+    hasUserChangedSelectionRef.current = true;
     setSelectedOperator(nextOp);
   };
 
-  const handleSavePoint = (savedPoint: PickupPointData, isEditing: boolean) => {
-    const nextPoints = isEditing
-      ? points.map((p) => (p.id === savedPoint.id ? savedPoint : p))
-      : [...points, savedPoint];
+  const handleSavePoint = async (
+    input: PickupPointFormInput,
+    editingId: string | null,
+  ) => {
+    const result = editingId
+      ? await updatePickupPointApi(editingId, input, points)
+      : await createPickupPointApi(input, points);
 
-    setPoints(nextPoints);
-    savePickupPoints(nextPoints);
-    setSelectedExit(savedPoint.pintuKeluar);
-    setSelectedOperator(savedPoint.operator);
+    setPoints(result.items);
+    setStorageMode(result.storageMode);
+    if (result.savedPoint) {
+      hasUserChangedSelectionRef.current = true;
+      setSelectedExit(result.savedPoint.pintuKeluar);
+      setSelectedOperator(result.savedPoint.operator);
+    }
+
+    const label = result.savedPoint?.namaTitikTemu ?? input.namaTitikTemu;
     showToast(
-      isEditing
-        ? `Perubahan titik "${savedPoint.namaTitikTemu}" berhasil disimpan.`
-        : `Data titik "${savedPoint.namaTitikTemu}" berhasil ditambahkan.`,
+      editingId
+        ? `Perubahan titik "${label}" berhasil disimpan.`
+        : `Data titik "${label}" berhasil ditambahkan.`,
     );
   };
 
-  const handleDeletePoint = (id: string) => {
-    if (points.length <= 1) return;
+  const handleDeletePoint = async (id: string) => {
     const target = points.find((p) => p.id === id);
-    const nextPoints = points.filter((p) => p.id !== id);
-    setPoints(nextPoints);
-    savePickupPoints(nextPoints);
+    const result = await deletePickupPointApi(id, points);
+    setPoints(result.items);
+    setStorageMode(result.storageMode);
 
-    const nextActive = findMatchingPoint(nextPoints, selectedExit, selectedOperator);
+    const nextActive = findMatchingPoint(result.items, selectedExit, selectedOperator);
     if (nextActive) {
       setSelectedExit(nextActive.pintuKeluar);
       setSelectedOperator(nextActive.operator);
@@ -96,15 +155,18 @@ export default function App() {
     );
   };
 
-  const handleResetDefaults = () => {
-    const defaults = resetPickupPointsToDefault();
-    setPoints(defaults);
-    setSelectedExit(defaults[0].pintuKeluar);
-    setSelectedOperator(defaults[0].operator);
+  const handleResetDefaults = async () => {
+    const result = await resetPickupPointsApi();
+    setPoints(result.items);
+    setStorageMode(result.storageMode);
+    hasUserChangedSelectionRef.current = true;
+    setSelectedExit(result.items[0].pintuKeluar);
+    setSelectedOperator(result.items[0].operator);
     showToast('Data dikembalikan ke 3 data simulasi bawaan Stasiun Gubeng Lama.');
   };
 
   const handlePreviewInPassenger = (point: PickupPointData) => {
+    hasUserChangedSelectionRef.current = true;
     setSelectedExit(point.pintuKeluar);
     setSelectedOperator(point.operator);
     setActiveTab('penumpang');
@@ -116,7 +178,32 @@ export default function App() {
         <TopBar activeTab={activeTab} onSelectTab={setActiveTab} />
       )}
 
-      <main className="px-4 pt-6 pb-14 sm:px-6 sm:pt-8 sm:pb-16">
+      <main className="px-4 pt-5 pb-14 sm:px-6 sm:pt-7 sm:pb-16">
+        {/* Compact Storage Sync Indicator */}
+        <div
+          className={`no-print mx-auto mb-4 flex items-center justify-end gap-1.5 text-[11px] font-semibold text-[#47665a] ${
+            isStandalonePassengerMode || activeTab === 'penumpang'
+              ? 'max-w-md'
+              : activeTab === 'qr'
+                ? 'max-w-5xl'
+                : 'max-w-6xl'
+          }`}
+          data-testid="storage-mode-indicator"
+          data-storage-mode={storageMode}
+        >
+          {storageMode === 'server' ? (
+            <>
+              <Cloud className="h-3.5 w-3.5 shrink-0 text-[#0b6b50]" aria-hidden="true" />
+              <span className="text-[#08543f]">Tersinkronisasi Server</span>
+            </>
+          ) : (
+            <>
+              <HardDrive className="h-3.5 w-3.5 shrink-0 text-[#687f75]" aria-hidden="true" />
+              <span>Mode Lokal Browser</span>
+            </>
+          )}
+        </div>
+
         {isStandalonePassengerMode || activeTab === 'penumpang' ? (
           <PassengerView
             points={points}
@@ -130,13 +217,14 @@ export default function App() {
         ) : activeTab === 'kelola' ? (
           <ManageDataView
             points={points}
+            storageMode={storageMode}
             onSavePoint={handleSavePoint}
             onDeletePoint={handleDeletePoint}
             onResetDefaults={handleResetDefaults}
             onPreviewInPassenger={handlePreviewInPassenger}
           />
         ) : (
-          <QrCardView />
+          <QrCardView points={points} />
         )}
       </main>
 

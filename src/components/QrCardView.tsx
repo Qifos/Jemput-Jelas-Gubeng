@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Check,
   Copy,
@@ -9,11 +9,21 @@ import {
   Ruler,
   X,
 } from 'lucide-react';
-import { buildPublicPassengerUrl } from '../utils/pickupLogic';
+import { PickupPointData } from '../types';
+import {
+  buildPublicPassengerUrl,
+  getUniqueExits,
+  isSafeHttpUrl,
+} from '../utils/pickupLogic';
 import { generateQrMatrix } from '../utils/qrGenerator';
+
+interface QrCardViewProps {
+  points: PickupPointData[];
+}
 
 interface PrintableCardProps {
   url: string;
+  targetPintu: string;
   svgPath: string;
   matrixSize: number;
   showGuides?: boolean;
@@ -22,6 +32,7 @@ interface PrintableCardProps {
 
 function A6QrCardSheet({
   url,
+  targetPintu,
   svgPath,
   matrixSize,
   showGuides = false,
@@ -51,7 +62,9 @@ function A6QrCardSheet({
           Titik Jemput Ojek Online — Stasiun Gubeng Lama
         </h3>
         <p className="text-[11px] font-medium text-[#466358]">
-          Pindai QR untuk panduan rute trotoar &amp; cek kendaraan sebelum naik
+          {targetPintu
+            ? `Target: ${targetPintu}`
+            : 'Pindai QR untuk panduan rute trotoar & cek kendaraan sebelum naik'}
         </p>
       </div>
 
@@ -94,24 +107,47 @@ function A6QrCardSheet({
   );
 }
 
-export function QrCardView() {
-  const defaultUrl = useMemo(() => {
+export function QrCardView({ points }: QrCardViewProps) {
+  const uniqueExits = useMemo(() => getUniqueExits(points), [points]);
+  const [targetPintu, setTargetPintu] = useState<string>('');
+
+  // Reset targetPintu if a previously selected exit was deleted or renamed
+  useEffect(() => {
+    if (targetPintu && !uniqueExits.includes(targetPintu)) {
+      setTargetPintu('');
+    }
+  }, [targetPintu, uniqueExits]);
+
+  const computeUrlForPintu = (pintu: string) => {
     if (typeof window === 'undefined') {
-      return 'https://jemputjelasgubeng.example/?mode=penumpang';
+      return buildPublicPassengerUrl(
+        'https:',
+        'https://jemputjelasgubeng.example',
+        '/',
+        pintu,
+      );
     }
     return buildPublicPassengerUrl(
       window.location.protocol,
       window.location.origin,
       window.location.pathname,
+      pintu,
     );
-  }, []);
+  };
 
-  const [publicUrl, setPublicUrl] = useState<string>(defaultUrl);
+  const defaultUrl = useMemo(() => computeUrlForPintu(targetPintu), [targetPintu]);
+  const [publicUrl, setPublicUrl] = useState<string>(() => computeUrlForPintu(''));
   const [copied, setCopied] = useState(false);
   const [showPrintPreview, setShowPrintPreview] = useState(false);
   const [showSafeGuides, setShowSafeGuides] = useState(true);
 
+  const handleChangeTargetPintu = (nextPintu: string) => {
+    setTargetPintu(nextPintu);
+    setPublicUrl(computeUrlForPintu(nextPintu));
+  };
+
   const effectiveUrl = publicUrl.trim() || defaultUrl;
+  const safeExternalHref = isSafeHttpUrl(effectiveUrl) ? effectiveUrl : defaultUrl;
 
   const qrMatrix = useMemo(() => generateQrMatrix(effectiveUrl), [effectiveUrl]);
 
@@ -151,6 +187,36 @@ export function QrCardView() {
             <h3 id="qr-config-heading" className="text-base font-extrabold text-[#10241d]">
               Pengaturan Tautan &amp; Cetak
             </h3>
+
+            {/* Target Pintu Keluar untuk QR */}
+            <div>
+              <label
+                htmlFor="qr-target-pintu"
+                className="mb-1.5 block text-xs font-bold text-[#1e3d31]"
+              >
+                Target Pintu Keluar untuk QR (Opsional)
+              </label>
+              <select
+                id="qr-target-pintu"
+                value={targetPintu}
+                onChange={(e) => handleChangeTargetPintu(e.target.value)}
+                className="min-h-[42px] w-full rounded-xl border border-[#c8dbd2] bg-white px-3.5 py-2 text-sm font-medium text-[#10241d] focus:border-[#0b6b50] focus:ring-2 focus:ring-[#0b6b50]/20 focus:outline-none"
+              >
+                <option value="">Semua Pintu / Umum</option>
+                {uniqueExits.map((exit) => (
+                  <option key={exit} value={exit}>
+                    {exit}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs leading-relaxed text-[#4f6c61]">
+                Pilih pintu keluar tertentu agar QR otomatis menyusun tautan{' '}
+                <code className="rounded bg-[#eef5f1] px-1 py-0.5 font-mono text-[11px] font-semibold text-[#08543f]">
+                  ?mode=penumpang&amp;pintu=...
+                </code>
+                .
+              </p>
+            </div>
 
             <div>
               <label
@@ -205,7 +271,7 @@ export function QrCardView() {
               </button>
 
               <a
-                href={effectiveUrl}
+                href={safeExternalHref}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[#c8dbd2] bg-white px-3.5 py-2 text-xs font-bold text-[#0b6b50] hover:bg-[#edf6f2]"
@@ -263,6 +329,7 @@ export function QrCardView() {
             <div className="w-full max-w-[360px]">
               <A6QrCardSheet
                 url={effectiveUrl}
+                targetPintu={targetPintu}
                 svgPath={qrMatrix.svgPath}
                 matrixSize={qrMatrix.size}
               />
@@ -312,6 +379,7 @@ export function QrCardView() {
 
                 <A6QrCardSheet
                   url={effectiveUrl}
+                  targetPintu={targetPintu}
                   svgPath={qrMatrix.svgPath}
                   matrixSize={qrMatrix.size}
                   showGuides={showSafeGuides}
@@ -359,6 +427,7 @@ export function QrCardView() {
       <div className="print-only-root hidden">
         <A6QrCardSheet
           url={effectiveUrl}
+          targetPintu={targetPintu}
           svgPath={qrMatrix.svgPath}
           matrixSize={qrMatrix.size}
         />

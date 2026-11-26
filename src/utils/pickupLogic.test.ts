@@ -7,13 +7,18 @@ import {
 } from '../data/defaultPickupPoints';
 import {
   buildPublicPassengerUrl,
+  DUPLICATE_COMBO_ERROR,
   evaluateVehicleChecklist,
+  findDuplicatePickupPoint,
   findMatchingPoint,
   formatIndonesianDate,
   getOperatorsForExit,
   getUniqueExits,
   isPassengerModeFromSearch,
+  isSafeHttpUrl,
   normalizePickupPoints,
+  parsePassengerQueryParams,
+  resolveInitialSelection,
   validatePickupPointForm,
   wrapLabelLines,
 } from './pickupLogic';
@@ -84,6 +89,54 @@ test('validatePickupPointForm auto-fills default estimate when left empty', () =
   assert.equal(res.sanitized?.statusVerifikasi, 'Terkonfirmasi');
 });
 
+test('rejects duplicate (pintuKeluar + operator) case-insensitively while allowing self-edit', () => {
+  const duplicateInput = {
+    pintuKeluar: '  pintu keluar stasiun gubeng lama  ',
+    operator: 'Gojek' as const,
+    namaTitikTemu: 'Titik Duplikat Uji',
+    pesanPeringatan: 'Peringatan untuk data uji duplikat.',
+    penandaA: 'Area awal pintu keluar stasiun.',
+    penandaB: 'Jalur trotoar sisi kiri stasiun.',
+    penandaC: 'Titik temu area bawah jembatan.',
+    estimasiJalanKaki: '',
+    statusVerifikasi: 'Simulasi' as const,
+    sumberInformasi: 'Tim Uji Q3.05',
+    tanggalPemeriksaan: '2026-11-26',
+  };
+
+  assert.ok(
+    findDuplicatePickupPoint(
+      DEFAULT_PICKUP_POINTS,
+      duplicateInput.pintuKeluar,
+      duplicateInput.operator,
+    ),
+  );
+
+  // Creating new entry with duplicate combo must fail
+  const createRes = validatePickupPointForm(duplicateInput, DEFAULT_PICKUP_POINTS);
+  assert.equal(createRes.valid, false);
+  assert.equal(createRes.duplicateError, DUPLICATE_COMBO_ERROR);
+  assert.equal(createRes.errors.pintuKeluar, DUPLICATE_COMBO_ERROR);
+
+  // Editing the same record ID must succeed
+  const editSelfRes = validatePickupPointForm(
+    duplicateInput,
+    DEFAULT_PICKUP_POINTS,
+    'gubeng-lama-gojek',
+  );
+  assert.equal(editSelfRes.valid, true);
+  assert.equal(editSelfRes.duplicateError, undefined);
+
+  // Editing a different record ID to collide with gubeng-lama-gojek must fail
+  const editCollisionRes = validatePickupPointForm(
+    duplicateInput,
+    DEFAULT_PICKUP_POINTS,
+    'gubeng-lama-grab',
+  );
+  assert.equal(editCollisionRes.valid, false);
+  assert.equal(editCollisionRes.duplicateError, DUPLICATE_COMBO_ERROR);
+});
+
 test('dynamic exit and operator resolution works across multiple exits', () => {
   const extended = [
     ...DEFAULT_PICKUP_POINTS,
@@ -137,21 +190,74 @@ test('evaluateVehicleChecklist enforces 3/3 completion and reports missing keys'
   assert.deepEqual(full.missingKeys, []);
 });
 
-test('URL mode detection, public passenger URL builder, and Indonesian date formatting', () => {
+test('parses ?mode=penumpang&pintu=...&operator=... and resolves initial passenger selection', () => {
+  const extended = [
+    ...DEFAULT_PICKUP_POINTS,
+    {
+      ...DEFAULT_PICKUP_POINTS[1],
+      id: 'utara-grab',
+      pintuKeluar: 'Pintu Keluar Utara Gubeng Lama',
+      operator: 'Grab' as const,
+      namaTitikTemu: 'Shelter Utara (Simulasi)',
+    },
+    {
+      ...DEFAULT_PICKUP_POINTS[2],
+      id: 'utara-maxim',
+      pintuKeluar: 'Pintu Keluar Utara Gubeng Lama',
+      operator: 'Maxim' as const,
+      namaTitikTemu: 'Shelter Utara Maxim (Simulasi)',
+    },
+  ];
+
+  const parsed = parsePassengerQueryParams(
+    '?mode=penumpang&pintu=Pintu+Keluar+Utara+Gubeng+Lama&operator=maxim',
+  );
+  assert.equal(parsed.isPassengerMode, true);
+  assert.equal(parsed.pintu, 'Pintu Keluar Utara Gubeng Lama');
+  assert.equal(parsed.operator, 'Maxim');
+
+  const resolvedExact = resolveInitialSelection(extended, parsed);
+  assert.equal(resolvedExact.selectedExit, 'Pintu Keluar Utara Gubeng Lama');
+  assert.equal(resolvedExact.selectedOperator, 'Maxim');
+
+  // If operator isn't registered for that exit, fallback to first operator of that exit
+  const resolvedFallbackOp = resolveInitialSelection(extended, {
+    pintu: 'pintu keluar utara gubeng lama',
+    operator: 'Gojek',
+  });
+  assert.equal(resolvedFallbackOp.selectedExit, 'Pintu Keluar Utara Gubeng Lama');
+  assert.equal(resolvedFallbackOp.selectedOperator, 'Grab');
+
+  // Mode detection still works cleanly
   assert.equal(isPassengerModeFromSearch('?mode=penumpang'), true);
   assert.equal(isPassengerModeFromSearch('?foo=1&mode=PENUMPANG'), true);
   assert.equal(isPassengerModeFromSearch('?mode=kelola'), false);
   assert.equal(isPassengerModeFromSearch(''), false);
+});
 
+test('buildPublicPassengerUrl updates URL with target pintu parameter and validates safe HTTP URLs', () => {
   assert.equal(
     buildPublicPassengerUrl('https:', 'https://gubeng.app', '/'),
     'https://gubeng.app/?mode=penumpang',
+  );
+  assert.equal(
+    buildPublicPassengerUrl(
+      'https:',
+      'https://gubeng.app',
+      '/',
+      'Pintu Keluar Utara Gubeng Lama',
+    ),
+    'https://gubeng.app/?mode=penumpang&pintu=Pintu+Keluar+Utara+Gubeng+Lama',
   );
   assert.equal(
     buildPublicPassengerUrl('file:', 'null', '/index.html'),
     'https://jemputjelasgubeng.example/?mode=penumpang',
   );
 
+  assert.equal(isSafeHttpUrl('https://gubeng.app/?mode=penumpang'), true);
+  assert.equal(isSafeHttpUrl('http://localhost:3000/?mode=penumpang'), true);
+  assert.equal(isSafeHttpUrl('javascript:alert(1)'), false);
+  assert.equal(isSafeHttpUrl('data:text/html,hi'), false);
   assert.equal(formatIndonesianDate('2026-11-22'), '22 Nov 2026');
 });
 
@@ -167,7 +273,6 @@ test('generateQrMatrix produces a valid scannable QR code with finder patterns',
   assert.ok(qr.size >= 21, 'QR version 1+ must be at least 21x21 modules');
   assert.equal(qr.modules.length, qr.size);
   assert.equal(qr.modules[0].length, qr.size);
-  // Top-left finder pattern corner (0,0) must be dark, (1,1) light, (2,2) dark
   assert.equal(qr.modules[0][0], true);
   assert.equal(qr.modules[1][1], false);
   assert.equal(qr.modules[2][2], true);
@@ -202,5 +307,3 @@ test('getMapHighlightState switches distinct marker colors and zone emphasis for
   assert.notEqual(stateC.destination.fill, stateA.destination.fill);
   assert.equal(stateC.destination.strokeWidth, 3);
 });
-
-

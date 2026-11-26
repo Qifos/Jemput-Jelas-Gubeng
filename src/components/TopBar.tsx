@@ -8,7 +8,7 @@ interface TopBarProps {
 
 const TABS: Array<{ id: AppTab; label: string; icon: typeof Smartphone }> = [
   { id: 'penumpang', label: 'Tampilan Penumpang', icon: Smartphone },
-  { id: 'kelola', label: 'Kelola Data Titik (Core Q3.04)', icon: Database },
+  { id: 'kelola', label: 'Kelola Data Titik (MVP)', icon: Database },
   { id: 'qr', label: 'Kartu QR (A6)', icon: QrCode },
 ];
 

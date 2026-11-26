@@ -16,7 +16,11 @@ export interface ValidationResult {
   valid: boolean;
   errors: FormValidationErrors;
   sanitized?: PickupPointFormInput;
+  duplicateError?: string;
 }
+
+export const DUPLICATE_COMBO_ERROR =
+  'Kombinasi pintu keluar dan operator ini sudah terdaftar. Gunakan tombol Edit pada data yang ada atau masukkan nama pintu keluar baru.';
 
 const VALID_STATUSES: VerificationStatus[] = ['Simulasi', 'Terkonfirmasi'];
 
@@ -24,20 +28,44 @@ const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 const MIN_TEXT_LENGTH = 3;
 
+export function normalizeComboKey(pintuKeluar: string, operator: OperatorId): string {
+  return `${pintuKeluar.trim().toLowerCase()}::${operator}`;
+}
+
+export function findDuplicatePickupPoint(
+  points: PickupPointData[],
+  pintuKeluar: string,
+  operator: OperatorId,
+  excludeId?: string,
+): PickupPointData | undefined {
+  const targetKey = normalizeComboKey(pintuKeluar, operator);
+  return points.find(
+    (point) =>
+      point.id !== excludeId &&
+      normalizeComboKey(point.pintuKeluar, point.operator) === targetKey,
+  );
+}
+
 export function validatePickupPointForm(
   input: PickupPointFormInput,
+  existingPoints?: PickupPointData[],
+  excludeId?: string,
 ): ValidationResult {
   const errors: FormValidationErrors = {};
 
-  const pintuKeluar = input.pintuKeluar.trim();
-  const namaTitikTemu = input.namaTitikTemu.trim();
-  const pesanPeringatan = input.pesanPeringatan.trim();
-  const penandaA = input.penandaA.trim();
-  const penandaB = input.penandaB.trim();
-  const penandaC = input.penandaC.trim();
-  const sumberInformasi = input.sumberInformasi.trim();
-  const tanggalPemeriksaan = input.tanggalPemeriksaan.trim();
-  const rawEstimate = input.estimasiJalanKaki.trim();
+  const pintuKeluar = typeof input.pintuKeluar === 'string' ? input.pintuKeluar.trim() : '';
+  const namaTitikTemu = typeof input.namaTitikTemu === 'string' ? input.namaTitikTemu.trim() : '';
+  const pesanPeringatan =
+    typeof input.pesanPeringatan === 'string' ? input.pesanPeringatan.trim() : '';
+  const penandaA = typeof input.penandaA === 'string' ? input.penandaA.trim() : '';
+  const penandaB = typeof input.penandaB === 'string' ? input.penandaB.trim() : '';
+  const penandaC = typeof input.penandaC === 'string' ? input.penandaC.trim() : '';
+  const sumberInformasi =
+    typeof input.sumberInformasi === 'string' ? input.sumberInformasi.trim() : '';
+  const tanggalPemeriksaan =
+    typeof input.tanggalPemeriksaan === 'string' ? input.tanggalPemeriksaan.trim() : '';
+  const rawEstimate =
+    typeof input.estimasiJalanKaki === 'string' ? input.estimasiJalanKaki.trim() : '';
 
   if (!pintuKeluar) {
     errors.pintuKeluar = 'Pintu keluar wajib diisi.';
@@ -95,10 +123,21 @@ export function validatePickupPointForm(
     errors.tanggalPemeriksaan = 'Format tanggal pemeriksaan tidak valid.';
   }
 
+  let duplicateError: string | undefined;
+  if (
+    !errors.pintuKeluar &&
+    !errors.operator &&
+    Array.isArray(existingPoints) &&
+    findDuplicatePickupPoint(existingPoints, pintuKeluar, input.operator, excludeId)
+  ) {
+    duplicateError = DUPLICATE_COMBO_ERROR;
+    errors.pintuKeluar = DUPLICATE_COMBO_ERROR;
+  }
+
   const valid = Object.keys(errors).length === 0;
 
   if (!valid) {
-    return { valid: false, errors };
+    return { valid: false, errors, duplicateError };
   }
 
   return {
@@ -244,21 +283,105 @@ export function evaluateVehicleChecklist(
   };
 }
 
-export function isPassengerModeFromSearch(search: string): boolean {
+export interface ParsedPassengerQuery {
+  isPassengerMode: boolean;
+  pintu: string | null;
+  operator: OperatorId | null;
+}
+
+export function parsePassengerQueryParams(search: string): ParsedPassengerQuery {
   const params = new URLSearchParams(search);
-  return params.get('mode')?.toLowerCase() === 'penumpang';
+  const mode = params.get('mode')?.trim().toLowerCase() ?? '';
+  const rawPintu = params.get('pintu')?.trim() ?? '';
+  const rawOp = params.get('operator')?.trim().toLowerCase() ?? '';
+
+  const matchedOperator =
+    OPERATOR_LIST.find((op) => op.toLowerCase() === rawOp) ?? null;
+
+  return {
+    isPassengerMode: mode === 'penumpang',
+    pintu: rawPintu || null,
+    operator: matchedOperator,
+  };
+}
+
+export function isPassengerModeFromSearch(search: string): boolean {
+  return parsePassengerQueryParams(search).isPassengerMode;
+}
+
+export function resolveInitialSelection(
+  points: PickupPointData[],
+  query: Pick<ParsedPassengerQuery, 'pintu' | 'operator'>,
+): { selectedExit: string; selectedOperator: OperatorId } {
+  const fallback = points[0] ?? DEFAULT_PICKUP_POINTS[0];
+
+  let matchedExit: string | null = null;
+  if (query.pintu) {
+    const normalizedQueryPintu = query.pintu.trim().toLowerCase();
+    const foundByExit = points.find(
+      (p) => p.pintuKeluar.trim().toLowerCase() === normalizedQueryPintu,
+    );
+    if (foundByExit) {
+      matchedExit = foundByExit.pintuKeluar;
+    }
+  }
+
+  if (matchedExit) {
+    const opsForExit = getOperatorsForExit(points, matchedExit);
+    if (query.operator && opsForExit.includes(query.operator)) {
+      return { selectedExit: matchedExit, selectedOperator: query.operator };
+    }
+    return {
+      selectedExit: matchedExit,
+      selectedOperator: opsForExit[0] ?? fallback.operator,
+    };
+  }
+
+  if (query.operator) {
+    const foundByOp = points.find((p) => p.operator === query.operator);
+    if (foundByOp) {
+      return {
+        selectedExit: foundByOp.pintuKeluar,
+        selectedOperator: foundByOp.operator,
+      };
+    }
+  }
+
+  return {
+    selectedExit: fallback.pintuKeluar,
+    selectedOperator: fallback.operator,
+  };
 }
 
 export function buildPublicPassengerUrl(
   protocol: string,
   origin: string,
   pathname: string,
+  targetPintu?: string,
 ): string {
-  if (protocol === 'http:' || protocol === 'https:') {
-    const cleanPath = pathname || '/';
-    return `${origin}${cleanPath}?mode=penumpang`;
+  const base =
+    protocol === 'http:' || protocol === 'https:'
+      ? `${origin}${pathname || '/'}`
+      : 'https://jemputjelasgubeng.example/';
+
+  const params = new URLSearchParams();
+  params.set('mode', 'penumpang');
+
+  const trimmedPintu = targetPintu?.trim();
+  if (trimmedPintu) {
+    params.set('pintu', trimmedPintu);
   }
-  return 'https://jemputjelasgubeng.example/?mode=penumpang';
+
+  return `${base}?${params.toString()}`;
+}
+
+export function isSafeHttpUrl(urlString: string): boolean {
+  try {
+    const parsed = new URL(urlString);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 const INDONESIAN_MONTHS = [
@@ -356,4 +479,3 @@ export function wrapLabelLines(
 
   return lines.slice(0, maxLines);
 }
-

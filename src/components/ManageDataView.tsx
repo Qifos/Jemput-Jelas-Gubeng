@@ -17,18 +17,19 @@ import {
   PickupPointFormInput,
   VerificationStatus,
 } from '../types';
+import { ApiValidationError, StorageMode } from '../utils/api';
 import {
   createEmptyFormInput,
-  createPointId,
   formatIndonesianDate,
   validatePickupPointForm,
 } from '../utils/pickupLogic';
 
 interface ManageDataViewProps {
   points: PickupPointData[];
-  onSavePoint: (point: PickupPointData, isEditing: boolean) => void;
-  onDeletePoint: (id: string) => void;
-  onResetDefaults: () => void;
+  storageMode: StorageMode;
+  onSavePoint: (input: PickupPointFormInput, editingId: string | null) => Promise<void>;
+  onDeletePoint: (id: string) => Promise<void>;
+  onResetDefaults: () => Promise<void>;
   onPreviewInPassenger: (point: PickupPointData) => void;
 }
 
@@ -42,6 +43,7 @@ function getTodayIso(): string {
 
 export function ManageDataView({
   points,
+  storageMode,
   onSavePoint,
   onDeletePoint,
   onResetDefaults,
@@ -52,6 +54,8 @@ export function ManageDataView({
     createEmptyFormInput(getTodayIso()),
   );
   const [errors, setErrors] = useState<FormValidationErrors>({});
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
@@ -60,10 +64,14 @@ export function ManageDataView({
     value: PickupPointFormInput[K],
   ) => {
     setForm((prev) => ({ ...prev, [key]: value }));
-    if (errors[key]) {
+    setSubmitError(null);
+    if (errors[key] || ((key === 'pintuKeluar' || key === 'operator') && errors.pintuKeluar)) {
       setErrors((prev) => {
         const next = { ...prev };
         delete next[key];
+        if (key === 'operator') {
+          delete next.pintuKeluar;
+        }
         return next;
       });
     }
@@ -88,6 +96,7 @@ export function ManageDataView({
       tanggalPemeriksaan: point.tanggalPemeriksaan,
     });
     setErrors({});
+    setSubmitError(null);
     setConfirmDeleteId(null);
   };
 
@@ -95,40 +104,61 @@ export function ManageDataView({
     setEditingId(null);
     setForm(createEmptyFormInput(getTodayIso()));
     setErrors({});
+    setSubmitError(null);
   };
 
-  const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const validation = validatePickupPointForm(form);
+    setSubmitError(null);
+    const validation = validatePickupPointForm(form, points, editingId ?? undefined);
     if (!validation.valid || !validation.sanitized) {
       setErrors(validation.errors);
+      if (validation.duplicateError) {
+        setSubmitError(validation.duplicateError);
+      }
       return;
     }
 
-    const savedPoint: PickupPointData = {
-      id: editingId ?? createPointId(validation.sanitized.pintuKeluar, validation.sanitized.operator),
-      ...validation.sanitized,
-    };
-
-    onSavePoint(savedPoint, Boolean(editingId));
-    setEditingId(null);
-    setForm(createEmptyFormInput(getTodayIso()));
-    setErrors({});
+    setIsSubmitting(true);
+    try {
+      await onSavePoint(validation.sanitized, editingId);
+      setEditingId(null);
+      setForm(createEmptyFormInput(getTodayIso()));
+      setErrors({});
+      setSubmitError(null);
+    } catch (err) {
+      if (err instanceof ApiValidationError) {
+        if (err.errors) {
+          setErrors(err.errors);
+        }
+        setSubmitError(err.message);
+      } else {
+        setSubmitError('Gagal menyimpan data titik jemput. Silakan coba lagi.');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const handleConfirmDelete = (id: string) => {
+  const handleConfirmDelete = async (id: string) => {
     if (editingId === id) {
       handleCancelEdit();
     }
     setConfirmDeleteId(null);
-    onDeletePoint(id);
+    try {
+      await onDeletePoint(id);
+    } catch (err) {
+      if (err instanceof ApiValidationError) {
+        setSubmitError(err.message);
+      }
+    }
   };
 
-  const handleConfirmReset = () => {
+  const handleConfirmReset = async () => {
     handleCancelEdit();
     setConfirmReset(false);
     setConfirmDeleteId(null);
-    onResetDefaults();
+    await onResetDefaults();
   };
 
   const inputBaseClass =
@@ -147,11 +177,13 @@ export function ManageDataView({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h2 className="text-xl font-extrabold tracking-tight text-[#10241d] sm:text-2xl">
-            Kelola Data Titik Jemput (Core Q3.04)
+            Kelola Data Titik Jemput (MVP)
           </h2>
           <p className="mt-1 text-sm text-[#476459]">
-            Tambahkan, ubah, atau verifikasi data titik temu per pintu keluar dan operator. Data
-            tersimpan otomatis di browser (localStorage) dan langsung memperbarui Tampilan Penumpang.
+            Tambahkan, ubah, atau verifikasi data titik temu per pintu keluar dan operator.{' '}
+            {storageMode === 'server'
+              ? 'Perubahan tersimpan di server bersama sehingga langsung terlihat lintas perangkat.'
+              : 'Berjalan dalam mode lokal browser (localStorage) dan langsung memperbarui Tampilan Penumpang.'}
           </p>
         </div>
 
@@ -370,6 +402,16 @@ export function ManageDataView({
           </div>
 
           <form onSubmit={handleSubmit} noValidate className="space-y-4">
+            {submitError && (
+              <div
+                role="alert"
+                data-testid="form-duplicate-alert"
+                className="rounded-xl border border-[#e79b9b] bg-[#fef2f2] px-3.5 py-3 text-xs font-semibold leading-relaxed text-[#991b1b]"
+              >
+                {submitError}
+              </div>
+            )}
+
             {/* Row 1: Pintu Keluar & Operator */}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
@@ -657,10 +699,17 @@ export function ManageDataView({
               )}
               <button
                 type="submit"
-                className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-xl bg-[#0b6b50] px-5 py-2.5 text-sm font-bold text-white shadow-xs transition-colors hover:bg-[#08543f] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0b6b50]"
+                disabled={isSubmitting}
+                className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-xl bg-[#0b6b50] px-5 py-2.5 text-sm font-bold text-white shadow-xs transition-colors hover:bg-[#08543f] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0b6b50] disabled:opacity-60"
               >
                 <Save className="h-4 w-4 shrink-0" aria-hidden="true" />
-                <span>{editingId ? 'Simpan Perubahan' : 'Simpan Data Titik'}</span>
+                <span>
+                  {isSubmitting
+                    ? 'Menyimpan...'
+                    : editingId
+                      ? 'Simpan Perubahan'
+                      : 'Simpan Data Titik'}
+                </span>
               </button>
             </div>
           </form>
